@@ -225,6 +225,63 @@ detect_system() {
 }
 
 # ------------------------------------------------------------------------------
+# Function: ensure_brave_closed
+# Description:
+#   Checks if Brave is running and prompts/forces it to close.
+#   Necessary for preference modifications to take effect.
+# ------------------------------------------------------------------------------
+ensure_brave_closed() {
+    log_section "Checking for running Brave instances"
+    
+    check_running() {
+        # Check native binaries (exact match to avoid script self-match)
+        if pgrep -x "brave" > /dev/null || pgrep -x "brave-browser" > /dev/null; then
+            return 0
+        fi
+        
+        # Check Flatpak specifically using flatpak ps
+        if [ "$IS_FLATPAK" = true ] && flatpak ps | grep -q "com.brave.Browser"; then
+            return 0
+        fi
+        
+        return 1
+    }
+
+    while check_running; do
+        log_warn "Brave Browser is currently running."
+        echo -e "${YELLOW}Brave must be closed to apply settings.${NC}"
+        
+        # Interactive prompt
+        if [ -t 0 ]; then
+             read -r -p "Close Brave Browser automatically? [Y/n] " response
+             case "${response,,}" in
+                n|no)
+                    log_warn "Please close Brave manually and press Enter to continue..."
+                    read -r
+                    ;;
+                *)
+                    log_info "Closing Brave..."
+                    killall -q brave brave-browser
+                    if [ "$IS_FLATPAK" = true ]; then
+                        flatpak kill com.brave.Browser 2>/dev/null
+                    fi
+                    sleep 2
+                    ;;
+             esac
+        else
+            # Non-interactive: just kill
+            log_info "Running non-interactively. Force closing Brave..."
+            killall -q brave brave-browser
+            if [ "$IS_FLATPAK" = true ]; then
+                flatpak kill com.brave.Browser 2>/dev/null
+            fi
+            sleep 2
+        fi
+    done
+    log_info "✓ Brave Browser is closed"
+}
+
+# ------------------------------------------------------------------------------
 # Function: find_brave_executable
 # Description:
 #   Locates the Brave Browser executable or Flatpak command.
@@ -312,6 +369,32 @@ prompt_for_ai_choice() {
     fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: prompt_shortcut_type
+# Description:
+#   Asks the user which type of shortcut to create.
+# Sets global: SHORTCUT_CHOICE (1=Private, 2=Slim, 3=Both)
+# ------------------------------------------------------------------------------
+prompt_shortcut_type() {
+    # Allow non-interactive override via env var if needed
+    if [ -n "$SHORTCUT_CHOICE" ]; then
+        return
+    fi
+    
+    echo -e "\n${BLUE}Select shortcut type to create:${NC}"
+    echo "1) Private (Incognito + Privacy Flags) - [Default]"
+    echo "2) Slim (Standard Window + Privacy Flags)"
+    echo "3) Both"
+    
+    read -r -p "Enter choice [1-3]: " choice
+    case "$choice" in
+        2) SHORTCUT_CHOICE=2 ;;
+        3) SHORTCUT_CHOICE=3 ;;
+        *) SHORTCUT_CHOICE=1 ;;
+    esac
+}
+
+
 # ==============================================================================
 # Configuration Management Functions
 # ==============================================================================
@@ -336,11 +419,11 @@ find_profile_directory() {
 
     # Check if profile directory exists
     if [ -d "$BRAVE_DIR" ]; then
-            # Find all profile directories
+            # Find all profile directories (dirs containing a Preferences file)
             PROFILE_DIRS=()
-            while IFS= read -r -d '' dir; do
-                PROFILE_DIRS+=("$dir")
-            done < <(find "$BRAVE_DIR" -maxdepth 1 -type d \( -name "Default" -o -name "Profile *" \) -print0)
+            while IFS= read -r -d '' pref_file; do
+                PROFILE_DIRS+=("$(dirname "$pref_file")")
+            done < <(find "$BRAVE_DIR" -maxdepth 2 -name "Preferences" -print0)
 
             if [ ${#PROFILE_DIRS[@]} -gt 0 ]; then
                 log_info "Found ${#PROFILE_DIRS[@]} Brave profile(s):"
@@ -364,11 +447,11 @@ find_profile_directory() {
         for dir in "${alt_locations[@]}"; do
             if [ -d "$dir" ]; then
                 BRAVE_DIR="$dir"
-                # Find all profile directories
-                PROFILE_DIRS=()
-                while IFS= read -r -d '' dir; do
-                    PROFILE_DIRS+=("$dir")
-                done < <(find "$BRAVE_DIR" -maxdepth 1 -type d \( -name "Default" -o -name "Profile *" \) -print0)
+            # Find all profile directories (dirs containing a Preferences file)
+            PROFILE_DIRS=()
+            while IFS= read -r -d '' pref_file; do
+                PROFILE_DIRS+=("$(dirname "$pref_file")")
+            done < <(find "$BRAVE_DIR" -maxdepth 2 -name "Preferences" -print0)
                 
                 if [ ${#PROFILE_DIRS[@]} -gt 0 ]; then
                     log_info "Found Brave directory at: $BRAVE_DIR"
@@ -476,13 +559,21 @@ modify_preference() {
     [ "$JQ_AVAILABLE" = true ] || { log_warn "Warning: 'jq' is not installed. Skipping preference modification."; return; }
 
     local temp_file=$(mktemp)
-    jq "$key = $value" "$file" > "$temp_file"
+    
+    # Use standard jq setpath function.
+    # Convert dot notation (e.g. .brave.rewards.enabled) to array path (["brave", "rewards", "enabled"])
+    # and set the value, creating intermediate objects if needed.
+    jq --arg key "$key" --argjson val "$value" '
+        setpath($key | sub("^\\."; "") | split("."); $val)
+    ' "$file" > "$temp_file"
     
     if [ $? -eq 0 ]; then
         mv "$temp_file" "$file"
         log_info "✓ Set $key to $value"
     else
         log_error "Error: Failed to modify preference $key"
+        log_warn "jq output:"
+        cat "$temp_file"
         rm "$temp_file"
     fi
 }
@@ -528,16 +619,18 @@ remove_flag_from_local_state() {
 #   Saved to ~/.local/bin/brave-private
 # ------------------------------------------------------------------------------
 setup_launch_script() {
+    local target_path=$1
+    local use_incognito=$2
     local features=("${BASE_DISABLED_FEATURES[@]}")
+
     if [ "$DISABLE_BRAVE_AI" = true ]; then
         features+=("${AI_DISABLED_FEATURES[@]}")
     fi
     
     local disable_features_arg=$(IFS=,; echo "${features[*]}")
     
-    log_section "Creating custom Brave launch script"
-    local launch_script="$HOME/.local/bin/brave-private"
-    mkdir -p "$HOME/.local/bin"
+    log_section "Creating custom Brave launch script: $target_path"
+    mkdir -p "$(dirname "$target_path")"
 
     local cmd_start
     if [ "$IS_FLATPAK" = true ]; then
@@ -546,7 +639,12 @@ setup_launch_script() {
         cmd_start="$BRAVE_EXEC"
     fi
 
-cat > "$launch_script" << EOL
+    local incognito_flag=""
+    if [ "$use_incognito" = true ]; then
+        incognito_flag="--incognito"
+    fi
+
+cat > "$target_path" << EOL
 #!/bin/bash
 
 $cmd_start \\
@@ -579,13 +677,12 @@ $cmd_start \\
     --reset-variation-state \\
     --block-new-web-contents \\
     --start-maximized \\
-    --incognito \\
+    $incognito_flag \\
     "\$@"
 EOL
 
-    chmod +x "$launch_script"
-    log_info "✓ Created private Brave launcher at: $launch_script"
-    log_warn "Run Brave with improved privacy using: $launch_script"
+    chmod +x "$target_path"
+    log_info "✓ Created Brave launcher at: $target_path"
 }
 
 # ------------------------------------------------------------------------------
@@ -595,19 +692,23 @@ EOL
 #   Saved to ~/.local/share/applications/brave-private.desktop
 # ------------------------------------------------------------------------------
 create_desktop_launcher() {
-    local desktop_entry="$HOME/.local/share/applications/brave-private.desktop"
-    mkdir -p "$HOME/.local/share/applications"
+    local desktop_path=$1
+    local exec_path=$2
+    local name=$3
+    local icon_name=$4
 
-    local icon_path="brave-browser"
-    [ "$IS_FLATPAK" = true ] && icon_path="com.brave.Browser"
+    log_section "Creating desktop launcher: $name"
+    mkdir -p "$(dirname "$desktop_path")"
 
-    cat > "$desktop_entry" << EOL
+    local icon_path="$icon_name"
+
+    cat > "$desktop_path" << EOL
 [Desktop Entry]
 Version=1.0
-Name=Brave (Private Mode)
-GenericName=Web Browser - Privacy Mode
+Name=$name
+GenericName=Web Browser
 Comment=Access the Internet with enhanced privacy settings
-Exec=$HOME/.local/bin/brave-private %U
+Exec=$exec_path %U
 Icon=$icon_path
 Terminal=false
 Type=Application
@@ -615,7 +716,7 @@ Categories=Network;WebBrowser;
 StartupNotify=true
 EOL
 
-    log_info "✓ Created desktop launcher for private Brave"
+    log_info "✓ Created desktop launcher for $name"
 }
 
 # ------------------------------------------------------------------------------
@@ -629,17 +730,12 @@ apply_preferences() {
     
     log_section "Modifying Brave preferences"
 
-    if pgrep -f "brave" > /dev/null || pgrep -f "com.brave.Browser" > /dev/null; then
-        log_warn "Warning: Brave Browser is currently running."
-        log_warn "Close Brave Browser and run this script again for full effect."
-        return
-    else
-        for profile_path in "${PROFILE_DIRS[@]}"; do
-            local pref_file="$profile_path/Preferences"
-            local profile_name=$(basename "$profile_path")
-            
-            if [ -f "$pref_file" ]; then
-                log_info "Configuring profile: $profile_name"
+    for profile_path in "${PROFILE_DIRS[@]}"; do
+        local pref_file="$profile_path/Preferences"
+        local profile_name=$(basename "$profile_path")
+        
+        if [ -f "$pref_file" ]; then
+            log_info "Configuring profile: $profile_name"
             # Rewards
             modify_preference '.brave.rewards.enabled' 'false' "$pref_file"
             modify_preference '.brave.rewards.hide_button' 'true' "$pref_file"
@@ -686,7 +782,6 @@ apply_preferences() {
         else
             log_warn "Warning: Local State file not found at $local_state_file"
         fi
-    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -818,8 +913,16 @@ apply_flatpak_overrides() {
 print_summary() {
     log_section "=== Setup Complete ==="
     log_info "Brave Browser has been configured for enhanced privacy:"
-    echo "1. Created private launcher: $HOME/.local/bin/brave-private"
-    echo "2. Added desktop shortcut: Brave (Private Mode)"
+    
+    if [ "$SHORTCUT_CHOICE" -eq 1 ] || [ "$SHORTCUT_CHOICE" -eq 3 ]; then
+        echo "1. Created private launcher: $HOME/.local/bin/brave-private"
+        echo "   -> Desktop shortcut: Brave (Private Mode)"
+    fi
+    if [ "$SHORTCUT_CHOICE" -eq 2 ] || [ "$SHORTCUT_CHOICE" -eq 3 ]; then
+        echo "2. Created Slim launcher: $HOME/.local/bin/brave-Slim"
+        echo "   -> Desktop shortcut: Brave (Slim)"
+    fi
+    
     echo "3. Created network blocking tools"
     
     [ ${#PROFILE_DIRS[@]} -gt 0 ] && [ "$JQ_AVAILABLE" = true ] && echo "4. Modified browser preferences for all profiles"
@@ -842,7 +945,11 @@ print_summary() {
         echo -e "Run this script with sudo for full functionality: ${YELLOW}sudo $0${NC}"
     fi
     
-    log_info "\nLaunch privacy-focused Brave with: $HOME/.local/bin/brave-private"
+    if [ "$SHORTCUT_CHOICE" -eq 1 ] || [ "$SHORTCUT_CHOICE" -eq 3 ]; then
+        log_info "\nLaunch privacy-focused Brave with: $HOME/.local/bin/brave-private"
+    else
+        log_info "\nLaunch Slim Brave with: $HOME/.local/bin/brave-Slim"
+    fi
 }
 
 # ==============================================================================
@@ -864,14 +971,35 @@ main() {
     check_root
     detect_system
     prompt_for_ai_choice
+    ensure_brave_closed
     find_brave_executable
     find_profile_directory
     
     create_backups
     ensure_jq
     
-    setup_launch_script
-    create_desktop_launcher
+    prompt_shortcut_type
+    
+    local icon_name="brave-browser"
+    [ "$IS_FLATPAK" = true ] && icon_name="com.brave.Browser"
+
+    if [ "$SHORTCUT_CHOICE" -eq 1 ] || [ "$SHORTCUT_CHOICE" -eq 3 ]; then
+        setup_launch_script "$HOME/.local/bin/brave-private" true
+        create_desktop_launcher \
+            "$HOME/.local/share/applications/brave-private.desktop" \
+            "$HOME/.local/bin/brave-private" \
+            "Brave (Private Mode)" \
+            "$icon_name"
+    fi
+
+    if [ "$SHORTCUT_CHOICE" -eq 2 ] || [ "$SHORTCUT_CHOICE" -eq 3 ]; then
+        setup_launch_script "$HOME/.local/bin/brave-Slim" false
+        create_desktop_launcher \
+            "$HOME/.local/share/applications/brave-Slim.desktop" \
+            "$HOME/.local/bin/brave-Slim" \
+            "Brave (Slim)" \
+            "$icon_name"
+    fi
     
     apply_preferences
     block_telemetry

@@ -152,24 +152,71 @@ for %%D in (%DOMAINS%) do (
 echo    - Telemetry blocking complete.
 echo.
 
-:: 6. Create Shortcut
-echo [6/6] Creating private shortcut...
-set "SHORTCUT_PATH=%USERPROFILE%\Desktop\Brave (Private).lnk"
-set "ARGS=--disable-brave-sync --disable-features=BraveRewards,BraveAds,BraveWallet,BraveNews,Speedreader,BraveAdblock,BraveSpeedreader,BraveVPN,Crypto,CryptoWallets,InterestCohortAPI,Fledge,Topics,InterestFeedV2,UseChromeOSDirectVideoDecoder,BraveLeo,BraveLeoInline,BraveAIChat,BraveAIPrompts,BravePromptAutocomplete --disable-background-networking --disable-component-extensions-with-background-pages --disable-domain-reliability --disable-sync-preferences --disable-site-isolation-trials --disable-prediction-service --disable-remote-fonts --disable-extensions-http-throttling --disable-breakpad --disable-speech-api --disable-translate --disable-sync --disable-first-run-ui --disable-client-side-phishing-detection --disable-component-updater --disable-suggestions-service --disable-webgl --no-pings --no-report-upload --no-service-autorun --no-first-run --aggressive-cache-discard --metrics-recording-only --clear-token-service --reset-variation-state --block-new-web-contents --start-maximized --incognito"
+:: 6. Select Shortcut Type
+echo [6/7] Select shortcut type...
+echo.
+echo Select shortcut type to create:
+echo 1) Private (Incognito + Privacy Flags) - [Default]
+echo 2) Slim (Standard Window + Privacy Flags)
+echo 3) Both
+echo.
+set /p "SHORTCUT_CHOICE=Enter choice [1-3]: "
+if not defined SHORTCUT_CHOICE set "SHORTCUT_CHOICE=1"
 
-set "PS_SHORTCUT_SCRIPT=%TEMP%\create_shortcut.ps1"
+:: Common Privacy Flags (No Incognito)
+set "BASE_PRIVACY_ARGS=--disable-brave-sync --disable-features=BraveRewards,BraveAds,BraveWallet,BraveNews,Speedreader,BraveAdblock,BraveSpeedreader,BraveVPN,Crypto,CryptoWallets,InterestCohortAPI,Fledge,Topics,InterestFeedV2,UseChromeOSDirectVideoDecoder,BraveLeo,BraveLeoInline,BraveAIChat,BraveAIPrompts,BravePromptAutocomplete --disable-background-networking --disable-component-extensions-with-background-pages --disable-domain-reliability --disable-sync-preferences --disable-site-isolation-trials --disable-prediction-service --disable-remote-fonts --disable-extensions-http-throttling --disable-breakpad --disable-speech-api --disable-translate --disable-sync --disable-first-run-ui --disable-client-side-phishing-detection --disable-component-updater --disable-suggestions-service --disable-webgl --no-pings --no-report-upload --no-service-autorun --no-first-run --aggressive-cache-discard --metrics-recording-only --clear-token-service --reset-variation-state --block-new-web-contents --start-maximized"
+
+:: 7. Create Shortcuts based on choice
+echo.
+echo [7/7] Creating shortcuts...
+
+:: Helper script for shortcut creation
+set "PS_CREATE_SHORTCUT=%TEMP%\create_shortcut_func.ps1"
 (
+echo param^($path, $target, $args, $desc^)
 echo $WshShell = New-Object -comObject WScript.Shell
-echo $Shortcut = $WshShell.CreateShortcut("%SHORTCUT_PATH%")
-echo $Shortcut.TargetPath = "%BRAVE_EXEC_PATH%"
-echo $Shortcut.Arguments = "%ARGS%"
-echo $Shortcut.Description = "Launch Brave with enhanced privacy settings"
-echo $Shortcut.Save()
-) > "%PS_SHORTCUT_SCRIPT%"
+echo $Shortcut = $WshShell.CreateShortcut^($path^)
+echo $Shortcut.TargetPath = $target
+echo $Shortcut.Arguments = $args
+echo $Shortcut.Description = $desc
+echo $Shortcut.Save^(\)
+) > "%PS_CREATE_SHORTCUT%"
 
-powershell -ExecutionPolicy Bypass -File "%PS_SHORTCUT_SCRIPT%"
-del "%PS_SHORTCUT_SCRIPT%" >nul 2>&1
-echo    - Shortcut created on Desktop: Brave (Private)
+if "%SHORTCUT_CHOICE%"=="1" goto CreatePrivate
+if "%SHORTCUT_CHOICE%"=="2" goto CreateSlim
+if "%SHORTCUT_CHOICE%"=="3" goto CreateBoth
+goto CreatePrivate
+
+:CreatePrivate
+set "S_PATH=%USERPROFILE%\Desktop\Brave (Private).lnk"
+set "S_ARGS=%BASE_PRIVACY_ARGS% --incognito"
+powershell -ExecutionPolicy Bypass -File "%PS_CREATE_SHORTCUT%" "%S_PATH%" "%BRAVE_EXEC_PATH%" "%S_ARGS%" "Launch Brave (Private)"
+echo    - Created: Brave (Private)
+goto EndShortcuts
+
+:CreateSlim
+set "S_PATH=%USERPROFILE%\Desktop\Brave (Slim).lnk"
+set "S_ARGS=%BASE_PRIVACY_ARGS%"
+powershell -ExecutionPolicy Bypass -File "%PS_CREATE_SHORTCUT%" "%S_PATH%" "%BRAVE_EXEC_PATH%" "%S_ARGS%" "Launch Brave (Slim)"
+echo    - Created: Brave (Slim)
+goto EndShortcuts
+
+:CreateBoth
+:: Private
+set "S_PATH=%USERPROFILE%\Desktop\Brave (Private).lnk"
+set "S_ARGS=%BASE_PRIVACY_ARGS% --incognito"
+powershell -ExecutionPolicy Bypass -File "%PS_CREATE_SHORTCUT%" "%S_PATH%" "%BRAVE_EXEC_PATH%" "%S_ARGS%" "Launch Brave (Private)"
+echo    - Created: Brave (Private)
+
+:: Slim
+set "S_PATH=%USERPROFILE%\Desktop\Brave (Slim).lnk"
+set "S_ARGS=%BASE_PRIVACY_ARGS%"
+powershell -ExecutionPolicy Bypass -File "%PS_CREATE_SHORTCUT%" "%S_PATH%" "%BRAVE_EXEC_PATH%" "%S_ARGS%" "Launch Brave (Slim)"
+echo    - Created: Brave (Slim)
+goto EndShortcuts
+
+:EndShortcuts
+del "%PS_CREATE_SHORTCUT%" >nul 2>&1
 echo.
 
 echo ==============================================================================

@@ -10,7 +10,7 @@ A powerful script to strip Brave Browser of bloated features, disable telemetry,
 - **Debloating**: Removes unwanted UI elements like the Rewards button and sidebar icons.
 - **Backup**: Creates timestamped backups of your `Preferences` and `hosts` file before making changes.
 
-## Linux / macOS Usage
+## Linux
 
 ### Prerequisite
 
