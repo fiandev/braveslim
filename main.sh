@@ -35,7 +35,7 @@ DISABLE_BRAVE_AI=""
 
 BRAVE_EXEC=""
 BRAVE_DIR=""
-PROFILE_DIR=""
+PROFILE_DIRS=()
 DEFAULT_PROFILE="Default"
 BACKUP_DIR=""
 
@@ -336,18 +336,21 @@ find_profile_directory() {
 
     # Check if profile directory exists
     if [ -d "$BRAVE_DIR" ]; then
-        if [ -d "$BRAVE_DIR/$DEFAULT_PROFILE" ]; then
-            PROFILE_DIR="$BRAVE_DIR/$DEFAULT_PROFILE"
-            log_info "Found Brave profile at: $PROFILE_DIR"
-        else
-            PROFILE_DIR=$(find "$BRAVE_DIR" -type d -name "Profile*" 2>/dev/null | head -n 1)
-            if [ -n "$PROFILE_DIR" ]; then
-                log_info "Found Brave profile at: $PROFILE_DIR"
+            # Find all profile directories
+            PROFILE_DIRS=()
+            while IFS= read -r -d '' dir; do
+                PROFILE_DIRS+=("$dir")
+            done < <(find "$BRAVE_DIR" -maxdepth 1 -type d \( -name "Default" -o -name "Profile *" \) -print0)
+
+            if [ ${#PROFILE_DIRS[@]} -gt 0 ]; then
+                log_info "Found ${#PROFILE_DIRS[@]} Brave profile(s):"
+                for p in "${PROFILE_DIRS[@]}"; do
+                    log_info "  - $(basename "$p")"
+                done
             else
                 log_warn "No profile directory found in $BRAVE_DIR"
                 log_warn "Will continue with other configurations"
             fi
-        fi
     else
         log_warn "Brave configuration directory not found at: $BRAVE_DIR"
         log_warn "Looking for alternative locations..."
@@ -361,21 +364,21 @@ find_profile_directory() {
         for dir in "${alt_locations[@]}"; do
             if [ -d "$dir" ]; then
                 BRAVE_DIR="$dir"
-                if [ -d "$dir/$DEFAULT_PROFILE" ]; then
-                    PROFILE_DIR="$dir/$DEFAULT_PROFILE"
-                else
-                    PROFILE_DIR=$(find "$dir" -type d -name "Profile*" 2>/dev/null | head -n 1)
-                fi
+                # Find all profile directories
+                PROFILE_DIRS=()
+                while IFS= read -r -d '' dir; do
+                    PROFILE_DIRS+=("$dir")
+                done < <(find "$BRAVE_DIR" -maxdepth 1 -type d \( -name "Default" -o -name "Profile *" \) -print0)
                 
-                if [ -n "$PROFILE_DIR" ]; then
+                if [ ${#PROFILE_DIRS[@]} -gt 0 ]; then
                     log_info "Found Brave directory at: $BRAVE_DIR"
-                    log_info "Found Brave profile at: $PROFILE_DIR"
+                    log_info "Found ${#PROFILE_DIRS[@]} Brave profile(s)"
                     break
                 fi
             fi
         done
         
-        if [ -z "$PROFILE_DIR" ]; then
+        if [ ${#PROFILE_DIRS[@]} -eq 0 ]; then
             log_warn "No Brave profile found. Have you run Brave at least once?"
             log_warn "Will continue with other configurations"
         fi
@@ -389,16 +392,20 @@ find_profile_directory() {
 #   Backs up: Preferences, Local State
 # ------------------------------------------------------------------------------
 create_backups() {
-    [ -z "$PROFILE_DIR" ] && return
+    [ ${#PROFILE_DIRS[@]} -eq 0 ] && return
 
     BACKUP_DIR="$HOME/brave-backup-$(date +%Y%m%d%H%M%S)"
     mkdir -p "$BACKUP_DIR"
     log_section "Creating backup in $BACKUP_DIR"
 
-    if [ -f "$PROFILE_DIR/Preferences" ]; then
-        cp "$PROFILE_DIR/Preferences" "$BACKUP_DIR/Preferences.bak"
-        log_info "✓ Preferences backup created"
-    fi
+    for profile_path in "${PROFILE_DIRS[@]}"; do
+        if [ -f "$profile_path/Preferences" ]; then
+            local p_name=$(basename "$profile_path")
+            mkdir -p "$BACKUP_DIR/$p_name"
+            cp "$profile_path/Preferences" "$BACKUP_DIR/$p_name/Preferences.bak"
+            log_info "✓ Preferences backup created for $p_name"
+        fi
+    done
 
     if [ -f "$BRAVE_DIR/Local State" ]; then
         cp "$BRAVE_DIR/Local State" "$BACKUP_DIR/Local_State.bak"
@@ -618,7 +625,7 @@ EOL
 #   rewards, wallet, and telemetry if Brave is not running.
 # ------------------------------------------------------------------------------
 apply_preferences() {
-    [ -n "$PROFILE_DIR" ] && [ "$JQ_AVAILABLE" = true ] || return
+    [ ${#PROFILE_DIRS[@]} -gt 0 ] && [ "$JQ_AVAILABLE" = true ] || return
     
     log_section "Modifying Brave preferences"
 
@@ -627,8 +634,12 @@ apply_preferences() {
         log_warn "Close Brave Browser and run this script again for full effect."
         return
     else
-        local pref_file="$PROFILE_DIR/Preferences"
-        if [ -f "$pref_file" ]; then
+        for profile_path in "${PROFILE_DIRS[@]}"; do
+            local pref_file="$profile_path/Preferences"
+            local profile_name=$(basename "$profile_path")
+            
+            if [ -f "$pref_file" ]; then
+                log_info "Configuring profile: $profile_name"
             # Rewards
             modify_preference '.brave.rewards.enabled' 'false' "$pref_file"
             modify_preference '.brave.rewards.hide_button' 'true' "$pref_file"
@@ -645,16 +656,17 @@ apply_preferences() {
             modify_preference '.brave.today.opted_in' 'false' "$pref_file"
             modify_preference '.brave.ipfs.enabled' 'false' "$pref_file"
 
-            if [ "$DISABLE_BRAVE_AI" = true ]; then
-                modify_preference '.brave.leo.enabled' 'false' "$pref_file"
-                modify_preference '.brave.leo.onboarding_seen' 'true' "$pref_file"
-                modify_preference '.brave.ai_chat.enabled' 'false' "$pref_file"
-                modify_preference '.brave.ai.autocomplete_enabled' 'false' "$pref_file"
+                if [ "$DISABLE_BRAVE_AI" = true ]; then
+                    modify_preference '.brave.leo.enabled' 'false' "$pref_file"
+                    modify_preference '.brave.leo.onboarding_seen' 'true' "$pref_file"
+                    modify_preference '.brave.ai_chat.enabled' 'false' "$pref_file"
+                    modify_preference '.brave.ai.autocomplete_enabled' 'false' "$pref_file"
+                fi
+                log_info "✓ Updated Brave preferences for $profile_name"
+            else
+                log_warn "Warning: Preferences file not found for $profile_name"
             fi
-            log_info "✓ Updated Brave preferences"
-        else
-            log_warn "Warning: Preferences file not found at $pref_file"
-        fi
+        done
         
         # Local State
         local local_state_file="$BRAVE_DIR/Local State"
@@ -810,7 +822,7 @@ print_summary() {
     echo "2. Added desktop shortcut: Brave (Private Mode)"
     echo "3. Created network blocking tools"
     
-    [ -n "$PROFILE_DIR" ] && [ "$JQ_AVAILABLE" = true ] && echo "4. Modified browser preferences"
+    [ ${#PROFILE_DIRS[@]} -gt 0 ] && [ "$JQ_AVAILABLE" = true ] && echo "4. Modified browser preferences for all profiles"
     [ "$IS_FLATPAK" = true ] && echo "5. Applied Flatpak-specific overrides"
     
     log_section "=== Recommended Additional Steps ==="
