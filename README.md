@@ -19,6 +19,8 @@ sudo dnf install curl
 
 ## Usage
 
+<img width="706" height="490" alt="Screenshot_20260210_071057" src="https://github.com/user-attachments/assets/4e30d544-c9ef-4f1e-b9b1-4f84b5af0f48" />
+
 Just copy and paste the following command into your terminal:
 
 ```sh
